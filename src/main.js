@@ -4,10 +4,23 @@ import { PlaywrightCrawler, RequestList } from 'crawlee';
 
 process.env.CRAWLEE_PURGE_ON_START ||= '0';
 
-await Actor.init();
-
 const HOME_URL = 'https://www.trendyol.com/en';
 const REVIEWS_API = 'https://apigw.trendyol.com/discovery-web-productgw-service/api/review/comments';
+const REVIEW_API_HINT_RE = /(review|comment)/i;
+const COUNTRY_PAGE_RE = /(select-country|country-selection)/i;
+const COOKIE_BUTTON_SELECTORS = [
+    '#onetrust-accept-btn-handler',
+    'button:has-text("Accept All Cookies")',
+    'button:has-text("Accept All")',
+    'button:has-text("Accept")',
+];
+const COUNTRY_SELECT_SELECTORS = [
+    'button:has-text("Select")',
+    'button:has-text("Continue")',
+    'button:has-text("Start Shopping")',
+    'button:has-text("Start shopping")',
+];
+const COUNTRY_PREFERENCE = ['United States', 'Turkey', 'United Kingdom', 'Germany', 'France', 'Italy'];
 const DEFAULT_PAGE_SIZE = 20;
 const BLOCKED_TITLE_RE = /(access denied|captcha|attention required|verify|robot|blocked)/i;
 
@@ -156,6 +169,31 @@ const buildApiUrl = ({ productId, page, size, sortBy, sortDirection }) => {
     url.searchParams.set('page', String(page));
     url.searchParams.set('size', String(size));
     return url.href;
+};
+
+const findExistingParam = (params, candidates) => candidates.find((name) => params.has(name)) || null;
+
+const buildApiUrlFromTemplate = (templateUrl, { productId, page, size, sortBy, sortDirection }) => {
+    if (!templateUrl) return null;
+    try {
+        const url = new URL(templateUrl);
+        const params = url.searchParams;
+        const contentKey = findExistingParam(params, ['contentId', 'productId', 'id', 'productContentId']);
+        const pageKey = findExistingParam(params, ['page', 'pageIndex', 'pageNumber']);
+        const sizeKey = findExistingParam(params, ['size', 'pageSize', 'limit']);
+        const sortKey = findExistingParam(params, ['orderBy', 'sortBy', 'sort', 'sorting']);
+        const dirKey = findExistingParam(params, ['orderByDirection', 'sortDirection', 'sortOrder', 'direction', 'order']);
+
+        if (contentKey && productId != null) params.set(contentKey, String(productId));
+        if (pageKey && page != null) params.set(pageKey, String(page));
+        if (sizeKey && size != null) params.set(sizeKey, String(size));
+        if (sortKey && sortBy) params.set(sortKey, String(sortBy));
+        if (dirKey && sortDirection) params.set(dirKey, String(sortDirection));
+
+        return url.href;
+    } catch {
+        return null;
+    }
 };
 
 const parseDate = (value) => {
@@ -312,11 +350,39 @@ const mapJsonLdReview = (review, meta) => {
     return sanitizeItem(mapped);
 };
 
-async function fetchReviewsPage({ page, apiUrl, referer }) {
+async function fetchReviewsPage({ page, apiUrl, referer, extraHeaders }) {
+    let origin = 'https://www.trendyol.com';
+    try {
+        if (referer) origin = new URL(referer).origin;
+    } catch {
+        // keep default origin
+    }
     const headers = {
         accept: 'application/json, text/plain, */*',
-        referer,
-        origin: 'https://www.trendyol.com',
+        origin,
+        ...(extraHeaders || {}),
+        referer: (extraHeaders && extraHeaders.referer) || referer,
+    };
+
+    const fetchViaPage = async () => {
+        try {
+            const pageHeaders = { accept: headers.accept, ...(extraHeaders || {}) };
+            delete pageHeaders.origin;
+            delete pageHeaders.referer;
+            const result = await page.evaluate(
+                async ({ apiUrl: url, hdrs }) => {
+                    const resp = await fetch(url, { headers: hdrs, credentials: 'include' });
+                    const text = await resp.text();
+                    return { status: resp.status, text };
+                },
+                { apiUrl, hdrs: pageHeaders }
+            );
+            const payload = safeJsonParse(result?.text);
+            if (payload) return { payload, status: result?.status };
+        } catch {
+            // ignore page-context fetch failures
+        }
+        return null;
     };
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
@@ -327,15 +393,146 @@ async function fetchReviewsPage({ page, apiUrl, referer }) {
         if (payload) return { payload, status };
 
         log.warning(`Non-JSON response (status ${status}) for ${apiUrl}. Retry ${attempt}/3.`);
+        if (status === 403 || status === 404) {
+            const viaPage = await fetchViaPage();
+            if (viaPage?.payload) return viaPage;
+        }
         await sleep(1000 + Math.random() * 1000);
     }
 
     return null;
 }
 
-async function main() {
+const stripRequestHeaders = (headers = {}) => {
+    const cleaned = {};
+    const blocked = new Set([
+        'host',
+        'connection',
+        'content-length',
+        'cookie',
+        'accept-encoding',
+        'sec-fetch-site',
+        'sec-fetch-mode',
+        'sec-fetch-dest',
+    ]);
+    for (const [key, value] of Object.entries(headers)) {
+        if (!key || blocked.has(key.toLowerCase())) continue;
+        cleaned[key] = value;
+    }
+    return cleaned;
+};
+
+const createReviewResponseCollector = (page, productId) => {
+    const collected = [];
+    const handler = async (response) => {
+        try {
+            const url = response.url();
+            try {
+                const hostname = new URL(url).hostname;
+                if (!hostname.endsWith('trendyol.com')) return;
+            } catch {
+                return;
+            }
+            const status = response.status();
+            const ct = response.headers()['content-type'] || '';
+            if (!/json|text\/plain/i.test(ct)) return;
+
+            const text = await response.text();
+            if (!text || text.length > 5_000_000) return;
+            const payload = safeJsonParse(text);
+            if (!payload) return;
+
+            const { comments, totalCount } = extractReviewsFromPayload(payload);
+            if (!comments.length && !totalCount) return;
+            if (productId && !url.includes(String(productId))) {
+                // URL does not contain productId but payload matches; keep as fallback
+                log.debug(`Captured review-like payload from ${url} without productId in URL.`);
+                }
+
+                collected.push({
+                    url,
+                status,
+                payload,
+                headers: stripRequestHeaders(response.request().headers()),
+                });
+        } catch {
+            // Ignore response parsing failures
+        }
+    };
+
+    page.on('response', handler);
+
+    return {
+        collected,
+        stop: () => page.off('response', handler),
+        first: () => collected[0] || null,
+    };
+};
+
+const clickFirstVisible = async (locator, timeout = 2000) => {
     try {
-        const input = (await Actor.getInput()) || {};
+        await locator.first().waitFor({ state: 'visible', timeout });
+        await locator.first().click({ timeout: 5000 });
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const handleCookieConsent = async (page) => {
+    for (const selector of COOKIE_BUTTON_SELECTORS) {
+        const clicked = await clickFirstVisible(page.locator(selector));
+        if (clicked) {
+            log.info(`Accepted cookie banner via selector: ${selector}`);
+            await sleep(500);
+            return true;
+        }
+    }
+    return false;
+};
+
+const handleCountrySelection = async (page) => {
+    const url = page.url();
+    const hasCountryFragment = (await page.locator('#m-country-selection').count()) > 0;
+    if (!COUNTRY_PAGE_RE.test(url) && !hasCountryFragment) return false;
+
+    log.info('Country selection detected. Attempting to pick a country.');
+
+    for (const country of COUNTRY_PREFERENCE) {
+        const direct = await clickFirstVisible(page.locator(`text=${country}`), 1200);
+        const wrapped = await clickFirstVisible(
+            page.locator(`text=${country}`).locator('..').locator('button, [role="button"]'),
+            1200
+        );
+        if (direct || wrapped) {
+            log.info(`Selected country: ${country}`);
+            break;
+        }
+    }
+
+    for (const selector of COUNTRY_SELECT_SELECTORS) {
+        const clicked = await clickFirstVisible(page.locator(selector), 3000);
+        if (clicked) {
+            log.info(`Confirmed country selection via selector: ${selector}`);
+            await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
+            return true;
+        }
+    }
+
+    return false;
+};
+
+const ensureReviewContext = async (page, reviewPageUrl) => {
+    await handleCookieConsent(page);
+    const countryHandled = await handleCountrySelection(page);
+    if (countryHandled && reviewPageUrl) {
+        await page.goto(reviewPageUrl, { waitUntil: 'domcontentloaded' });
+    }
+    await handleCookieConsent(page);
+};
+
+async function main() {
+    const input = (await Actor.getInput()) || {};
         const {
             productId,
             startUrls,
@@ -444,9 +641,8 @@ async function main() {
         log.info(`RequestList initialized with ${requestList.length()} requests`);
 
         log.info('Creating PlaywrightCrawler...');
-        const crawler = new PlaywrightCrawler({
+        const crawlerOptions = {
             requestList,
-            proxyConfiguration,
             maxRequestRetries: 3,
             maxConcurrency: 1,
             requestHandlerTimeoutSecs: 120,
@@ -456,6 +652,34 @@ async function main() {
             async requestHandler({ page, request }) {
                 log.info(`Processing: ${request.url}`);
                 log.info(`UserData: ${JSON.stringify(request.userData)}`);
+
+                const {
+                    productId: targetProductId,
+                    pageSize,
+                    sortBy,
+                    sortDirection,
+                    productUrl,
+                    reviewPageUrl,
+                } = request.userData || {};
+
+                const collector = createReviewResponseCollector(page, targetProductId);
+                let observedRequest = null;
+                const requestListener = (req) => {
+                    try {
+                        const url = req.url();
+                        const hostname = new URL(url).hostname;
+                        if (!hostname.endsWith('trendyol.com')) return;
+                        if (!REVIEW_API_HINT_RE.test(url)) return;
+                        if (targetProductId && !url.includes(String(targetProductId))) return;
+                        observedRequest = {
+                            url,
+                            headers: stripRequestHeaders(req.headers()),
+                        };
+                    } catch {
+                        // ignore request capture failures
+                    }
+                };
+                page.on('request', requestListener);
 
                 // Wait for page to load
                 try {
@@ -482,43 +706,106 @@ async function main() {
                         await Actor.setValue(debugKey, html, { contentType: 'text/html' });
                         log.warning(`Blocked page detected. Saved debug HTML to key "${debugKey}".`);
                     }
+                    collector.stop();
                     return;
                 }
 
-                const {
-                    productId: targetProductId,
-                    pageSize,
-                    sortBy,
-                    sortDirection,
-                    productUrl,
-                    reviewPageUrl,
-                } = request.userData || {};
+                const targetReviewUrl = reviewPageUrl || request.url || HOME_URL;
+                await ensureReviewContext(page, targetReviewUrl);
+
+                if (!targetReviewUrl || !page.url().includes('/reviews')) {
+                    log.info(`Ensuring review page navigation to ${targetReviewUrl}`);
+                    await page.goto(targetReviewUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+                }
+
+                try {
+                    await page.waitForLoadState('networkidle', { timeout: 10000 });
+                } catch (err) {
+                    log.warning(`Timeout waiting for networkidle after navigation: ${err.message}`);
+                }
 
                 const savedForProduct = savedByProduct.get(targetProductId) || 0;
                 if (savedForProduct >= RESULTS_WANTED) {
                     log.info(`Already saved ${savedForProduct} reviews for product ${targetProductId}, skipping`);
+                    collector.stop();
                     return;
                 }
+
+                let captured = collector.first();
+                if (!captured) {
+                    log.info('No review API response captured yet; reloading to trigger.');
+                    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+                    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+                    await sleep(1000);
+                    captured = collector.first();
+                }
+                collector.stop();
+                page.off('request', requestListener);
+
+                const apiTemplateUrl = captured?.url || observedRequest?.url || null;
+                const apiHeaders = captured?.headers || observedRequest?.headers || null;
 
                 log.info(`Starting to fetch reviews for product ${targetProductId} (already saved: ${savedForProduct}/${RESULTS_WANTED})`);
                 let saved = savedForProduct;
                 let pageNo = 1;
+                let maxPagesAllowed = MAX_PAGES;
 
-                while (pageNo <= MAX_PAGES && saved < RESULTS_WANTED) {
-                    const apiUrl = buildApiUrl({
-                        productId: targetProductId,
-                        page: pageNo,
-                        size: pageSize,
-                        sortBy,
-                        sortDirection,
-                    });
+                if (captured?.payload) {
+                    const { comments, totalCount, pageSize: payloadPageSize, totalPages } =
+                        extractReviewsFromPayload(captured.payload);
 
-                    log.info(`Fetching page ${pageNo}/${MAX_PAGES} from API: ${apiUrl}`);
+                    if (comments.length) {
+                        log.info(`Captured ${comments.length} review(s) from network response.`);
+                        for (const comment of comments) {
+                            if (saved >= RESULTS_WANTED) break;
+                            const review = mapReview(comment, {
+                                productId: targetProductId,
+                                productUrl,
+                                reviewPageUrl: targetReviewUrl,
+                            });
+                            if (!review || !Object.keys(review).length) continue;
+                            const key = buildReviewKey(review);
+                            if (seenReviews.has(key)) continue;
+                            seenReviews.add(key);
+                            await Actor.pushData(review);
+                            saved += 1;
+                        }
+                        savedByProduct.set(targetProductId, saved);
+                        pageNo = 2;
+
+                        const effectivePageSize = payloadPageSize || pageSize || PAGE_SIZE;
+                        const inferredTotalPages =
+                            totalPages || (totalCount && effectivePageSize ? Math.ceil(totalCount / effectivePageSize) : null);
+                        if (inferredTotalPages) {
+                            maxPagesAllowed = Math.min(MAX_PAGES, inferredTotalPages);
+                        }
+                    }
+                }
+
+                while (pageNo <= maxPagesAllowed && saved < RESULTS_WANTED) {
+                    const apiUrl =
+                        buildApiUrlFromTemplate(apiTemplateUrl, {
+                            productId: targetProductId,
+                            page: pageNo,
+                            size: pageSize,
+                            sortBy,
+                            sortDirection,
+                        }) ||
+                        buildApiUrl({
+                            productId: targetProductId,
+                            page: pageNo,
+                            size: pageSize,
+                            sortBy,
+                            sortDirection,
+                        });
+
+                    log.info(`Fetching page ${pageNo}/${maxPagesAllowed} from API: ${apiUrl}`);
 
                     const apiResult = await fetchReviewsPage({
                         page,
                         apiUrl,
-                        referer: reviewPageUrl || request.url || HOME_URL,
+                        referer: targetReviewUrl,
+                        extraHeaders: apiHeaders,
                     });
 
                     if (!apiResult?.payload) {
@@ -587,9 +874,9 @@ async function main() {
                     const effectivePageSize = payloadPageSize || pageSize || PAGE_SIZE;
                     const inferredTotalPages =
                         totalPages || (totalCount && effectivePageSize ? Math.ceil(totalCount / effectivePageSize) : null);
-                    const maxPagesAllowed = inferredTotalPages
-                        ? Math.min(MAX_PAGES, inferredTotalPages)
-                        : MAX_PAGES;
+                    if (inferredTotalPages) {
+                        maxPagesAllowed = Math.min(MAX_PAGES, inferredTotalPages);
+                    }
 
                     pageNo += 1;
                     if (pageNo > maxPagesAllowed) break;
@@ -604,7 +891,13 @@ async function main() {
                     log.error(`Request ${request.url} failed: ${error.message}`);
                 }
             },
-        });
+        };
+
+        if (proxyConfiguration) {
+            crawlerOptions.proxyConfiguration = proxyConfiguration;
+        }
+
+        const crawler = new PlaywrightCrawler(crawlerOptions);
 
         log.info('PlaywrightCrawler created successfully!');
         log.info('Starting PlaywrightCrawler...');
@@ -616,12 +909,18 @@ async function main() {
         if (totalSaved === 0) {
             log.warning('No reviews were scraped. Check if the product ID is valid or if there are reviews available.');
         }
+}
+
+const run = async () => {
+    await Actor.init();
+    try {
+        await main();
+    } catch (err) {
+        log.exception(err, 'Actor failed');
+        process.exitCode = 1;
     } finally {
         await Actor.exit();
     }
-}
+};
 
-main().catch((err) => {
-    log.exception(err, 'Actor failed');
-    process.exit(1);
-});
+run();
