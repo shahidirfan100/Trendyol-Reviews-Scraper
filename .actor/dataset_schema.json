@@ -1,0 +1,142 @@
+{
+  "actorSpecification": 1,
+  "fields": {
+    "type": "object",
+    "properties": {
+      "productId": {
+        "title": "Product ID",
+        "type": "string",
+        "description": "Trendyol product content ID"
+      },
+      "reviewId": {
+        "title": "Review ID",
+        "type": "string",
+        "description": "Review identifier"
+      },
+      "rating": {
+        "title": "Rating",
+        "type": "number",
+        "description": "Review rating"
+      },
+      "title": {
+        "title": "Title",
+        "type": "string",
+        "description": "Review title"
+      },
+      "comment": {
+        "title": "Comment",
+        "type": "string",
+        "description": "Review text"
+      },
+      "createdAt": {
+        "title": "Created At",
+        "type": "string",
+        "description": "Review creation time (ISO)"
+      },
+      "createdAtTimestamp": {
+        "title": "Created At Timestamp",
+        "type": "number",
+        "description": "Review creation time in milliseconds"
+      },
+      "likeCount": {
+        "title": "Like Count",
+        "type": "number",
+        "description": "Helpful votes"
+      },
+      "dislikeCount": {
+        "title": "Dislike Count",
+        "type": "number",
+        "description": "Unhelpful votes"
+      },
+      "isVerifiedPurchase": {
+        "title": "Verified Purchase",
+        "type": "boolean",
+        "description": "Whether the review is from a verified purchase"
+      },
+      "productSize": {
+        "title": "Product Size",
+        "type": "string",
+        "description": "Size selected by the reviewer (if available)"
+      },
+      "productColor": {
+        "title": "Product Color",
+        "type": "string",
+        "description": "Color selected by the reviewer (if available)"
+      },
+      "hasImage": {
+        "title": "Has Image",
+        "type": "boolean",
+        "description": "Whether the review includes images"
+      },
+      "reviewPageUrl": {
+        "title": "Review Page URL",
+        "type": "string",
+        "description": "Product reviews page URL"
+      },
+      "productUrl": {
+        "title": "Product URL",
+        "type": "string",
+        "description": "Product page URL"
+      }
+    }
+  },
+  "views": {
+    "overview": {
+      "title": "Overview",
+      "transformation": {
+        "fields": [
+          "productId",
+          "rating",
+          "comment",
+          "createdAt",
+          "likeCount",
+          "hasImage",
+          "productSize",
+          "productColor",
+          "reviewPageUrl"
+        ]
+      },
+      "display": {
+        "component": "table",
+        "properties": {
+          "productId": {
+            "label": "Product ID",
+            "format": "text"
+          },
+          "rating": {
+            "label": "Rating",
+            "format": "number"
+          },
+          "comment": {
+            "label": "Comment",
+            "format": "text"
+          },
+          "createdAt": {
+            "label": "Created At",
+            "format": "date"
+          },
+          "likeCount": {
+            "label": "Helpful",
+            "format": "number"
+          },
+          "hasImage": {
+            "label": "Has Image",
+            "format": "boolean"
+          },
+          "productSize": {
+            "label": "Size",
+            "format": "text"
+          },
+          "productColor": {
+            "label": "Color",
+            "format": "text"
+          },
+          "reviewPageUrl": {
+            "label": "Reviews",
+            "format": "link"
+          }
+        }
+      }
+    }
+  }
+}

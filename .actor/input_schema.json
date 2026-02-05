@@ -1,0 +1,102 @@
+{
+  "title": "Trendyol Reviews Scraper",
+  "description": "Scrape product reviews from Trendyol using a product ID or start URLs.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrls": {
+      "title": "Start URLs",
+      "type": "array",
+      "description": "Product or review URLs to scrape (optional).",
+      "editor": "requestListSources",
+      "default": [
+        {
+          "url": "https://www.trendyol.com/en/rooted/square-collar-t-shirt-blouse-lycra-ribbed-camisole-fabric-p-743505175/reviews"
+        }
+      ],
+      "prefill": [
+        {
+          "url": "https://www.trendyol.com/en/rooted/square-collar-t-shirt-blouse-lycra-ribbed-camisole-fabric-p-743505175/reviews"
+        }
+      ]
+    },
+    "productId": {
+      "title": "Product ID",
+      "type": "string",
+      "description": "Trendyol product content ID.",
+      "editor": "textfield",
+      "prefill": "743505175"
+    },
+    "results_wanted": {
+      "title": "Maximum number of reviews per product",
+      "type": "integer",
+      "description": "Maximum number of reviews to collect for each product.",
+      "minimum": 1,
+      "default": 20,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum number of pages",
+      "type": "integer",
+      "description": "Safety cap on the number of review pages to visit per product.",
+      "minimum": 1,
+      "default": 5,
+      "editor": "number"
+    },
+    "reviews_per_page": {
+      "title": "Reviews per page",
+      "type": "integer",
+      "description": "Number of reviews to request per page.",
+      "minimum": 1,
+      "maximum": 50,
+      "default": 20,
+      "editor": "number"
+    },
+    "sortBy": {
+      "title": "Sort by",
+      "type": "string",
+      "description": "Sorting for reviews.",
+      "editor": "select",
+      "default": "Date",
+      "enum": [
+        "Date",
+        "Rate",
+        "Helpfulness"
+      ],
+      "enumTitles": [
+        "Newest",
+        "Rating",
+        "Most helpful"
+      ]
+    },
+    "sortDirection": {
+      "title": "Sort direction",
+      "type": "string",
+      "description": "Sort direction.",
+      "editor": "select",
+      "default": "DESC",
+      "enum": [
+        "DESC",
+        "ASC"
+      ],
+      "enumTitles": [
+        "Descending",
+        "Ascending"
+      ]
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy for reliable scraping.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": false,
+        "apifyProxyGroups": [
+          "RESIDENTIAL"
+        ]
+      }
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
