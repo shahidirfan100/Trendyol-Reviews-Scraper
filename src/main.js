@@ -4,9 +4,9 @@ import { PlaywrightCrawler, RequestList } from 'crawlee';
 
 process.env.CRAWLEE_PURGE_ON_START ||= '0';
 
-const HOME_URL = 'https://www.trendyol.com/en';
-const REVIEWS_API = 'https://apigw.trendyol.com/discovery-web-productgw-service/api/review/comments';
-const REVIEW_API_HINT_RE = /(review|comment)/i;
+const HOME_URL = 'https://www.trendyol.com/';
+const REVIEWS_API = 'https://apigw.trendyol.com/discovery-storefront-trproductgw-service/api/review-read/product-reviews/detailed';
+const REVIEW_API_PATH_RE = /\/api\/(?:review-read\/product-reviews\/detailed|review\/comments)(?:\?|$)/i;
 const COUNTRY_PAGE_RE = /(select-country|country-selection)/i;
 const COOKIE_BUTTON_SELECTORS = [
     '#onetrust-accept-btn-handler',
@@ -15,12 +15,13 @@ const COOKIE_BUTTON_SELECTORS = [
     'button:has-text("Accept")',
 ];
 const COUNTRY_SELECT_SELECTORS = [
+    '[data-testid="country-select-btn-desktop"]',
     'button:has-text("Select")',
     'button:has-text("Continue")',
     'button:has-text("Start Shopping")',
     'button:has-text("Start shopping")',
 ];
-const COUNTRY_PREFERENCE = ['United States', 'Turkey', 'United Kingdom', 'Germany', 'France', 'Italy'];
+const COUNTRY_PREFERENCE = ['USA', 'United States', 'Türkiye', 'Turkey', 'Germany', 'France', 'Italy'];
 const DEFAULT_PAGE_SIZE = 20;
 const BLOCKED_TITLE_RE = /(access denied|captcha|attention required|verify|robot|blocked)/i;
 
@@ -87,15 +88,18 @@ const sanitizeItem = (item) => {
     return cleaned;
 };
 
+const normalizeTrendyolPath = (pathname = '') => pathname.replace(/^\/en(?=\/|$)/i, '');
+
 const buildReviewPageUrl = (value) => {
     if (!value) return null;
     try {
         const url = new URL(String(value));
         url.hash = '';
         url.search = '';
-        if (!/\/reviews\/?$/i.test(url.pathname)) {
-            url.pathname = url.pathname.replace(/\/+$/g, '') + '/reviews';
-        }
+        let pathname = normalizeTrendyolPath(url.pathname);
+        pathname = pathname.replace(/\/reviews\/?$/i, '/yorumlar');
+        if (!/\/yorumlar\/?$/i.test(pathname)) pathname = pathname.replace(/\/+$/g, '') + '/yorumlar';
+        url.pathname = pathname;
         return url.href;
     } catch {
         return null;
@@ -107,9 +111,9 @@ const normalizeProductUrl = (value) => {
     try {
         const url = new URL(String(value));
         url.hash = '';
-        if (/\/reviews\/?$/i.test(url.pathname)) {
-            url.pathname = url.pathname.replace(/\/reviews\/?$/i, '');
-        }
+        let pathname = normalizeTrendyolPath(url.pathname);
+        pathname = pathname.replace(/\/(?:reviews|yorumlar)\/?$/i, '');
+        url.pathname = pathname;
         return url.href;
     } catch {
         return null;
@@ -161,13 +165,23 @@ const normalizeSortDirection = (value) => {
     return raw === 'ASC' || raw === 'DESC' ? raw : 'DESC';
 };
 
+const toApiOrderBy = (sortBy) => {
+    const map = {
+        Date: 'Date',
+        Rate: 'Score',
+        Helpfulness: 'Helpfulness',
+    };
+    return map[sortBy] || 'Date';
+};
+
 const buildApiUrl = ({ productId, page, size, sortBy, sortDirection }) => {
     const url = new URL(REVIEWS_API);
     url.searchParams.set('contentId', String(productId));
-    url.searchParams.set('orderBy', sortBy);
-    url.searchParams.set('orderByDirection', sortDirection);
+    url.searchParams.set('orderBy', toApiOrderBy(sortBy));
+    url.searchParams.set('order', sortDirection);
     url.searchParams.set('page', String(page));
-    url.searchParams.set('size', String(size));
+    url.searchParams.set('pageSize', String(size));
+    url.searchParams.set('channelId', '1');
     return url.href;
 };
 
@@ -177,22 +191,42 @@ const buildApiUrlFromTemplate = (templateUrl, { productId, page, size, sortBy, s
     if (!templateUrl) return null;
     try {
         const url = new URL(templateUrl);
+        if (!REVIEW_API_PATH_RE.test(url.pathname + url.search)) return null;
         const params = url.searchParams;
         const contentKey = findExistingParam(params, ['contentId', 'productId', 'id', 'productContentId']);
         const pageKey = findExistingParam(params, ['page', 'pageIndex', 'pageNumber']);
-        const sizeKey = findExistingParam(params, ['size', 'pageSize', 'limit']);
+        const sizeKey = findExistingParam(params, ['size', 'pageSize', 'limit', 'perPage']);
         const sortKey = findExistingParam(params, ['orderBy', 'sortBy', 'sort', 'sorting']);
         const dirKey = findExistingParam(params, ['orderByDirection', 'sortDirection', 'sortOrder', 'direction', 'order']);
+        const channelKey = findExistingParam(params, ['channelId']);
 
         if (contentKey && productId != null) params.set(contentKey, String(productId));
         if (pageKey && page != null) params.set(pageKey, String(page));
         if (sizeKey && size != null) params.set(sizeKey, String(size));
-        if (sortKey && sortBy) params.set(sortKey, String(sortBy));
+        if (sortKey && sortBy) params.set(sortKey, String(toApiOrderBy(sortBy)));
         if (dirKey && sortDirection) params.set(dirKey, String(sortDirection));
+        if (channelKey) params.set(channelKey, '1');
 
         return url.href;
     } catch {
         return null;
+    }
+};
+
+const isLikelyReviewApiUrl = (rawUrl, productId) => {
+    try {
+        const url = new URL(rawUrl);
+        if (!url.hostname.endsWith('trendyol.com')) return false;
+        if (!REVIEW_API_PATH_RE.test(url.pathname + url.search)) return false;
+
+        const contentId =
+            url.searchParams.get('contentId') ||
+            url.searchParams.get('productId') ||
+            url.searchParams.get('id');
+        if (productId && contentId && String(contentId) !== String(productId)) return false;
+        return true;
+    } catch {
+        return false;
     }
 };
 
@@ -218,15 +252,22 @@ const parseDate = (value) => {
 const extractReviewsFromPayload = (payload) => {
     const root = payload?.result ?? payload?.data ?? payload;
     const comments =
+        root?.reviews ||
         root?.comments ||
         root?.commentList ||
         root?.items ||
         root?.data ||
         root?.results ||
         [];
-    const totalCount = getNumber(root?.totalCount ?? root?.total ?? root?.count ?? root?.totalElements);
+    const totalCount = getNumber(
+        root?.totalCount ??
+            root?.total ??
+            root?.count ??
+            root?.totalElements ??
+            root?.summary?.totalCommentCount
+    );
     const pageSize = getNumber(root?.size ?? root?.pageSize ?? root?.perPage);
-    const totalPages = getNumber(root?.totalPages ?? root?.pageCount);
+    const totalPages = getNumber(root?.totalPages ?? root?.pageCount ?? root?.summary?.totalPages);
     return {
         comments: Array.isArray(comments) ? comments : [],
         totalCount,
@@ -244,28 +285,36 @@ const mapReview = (comment, meta) => {
             comment.createdAt ||
             comment.date
     );
-    const images = comment.images || comment.imageUrls || comment.media || [];
+    const images = comment.images || comment.imageUrls || comment.media || comment.mediaFiles || [];
     const hasImage =
         Array.isArray(images) ? images.length > 0 : Boolean(comment.hasPhoto || comment.hasImage);
 
     return sanitizeItem({
         productId: meta.productId,
         reviewId: pickFirst(comment.id, comment.commentId, comment.reviewId, comment.reviewID),
+        reviewerName: pickFirst(comment.userFullName, comment.userName, comment.username),
         rating: getNumber(comment.rate ?? comment.rating ?? comment.starRating ?? comment.score),
         title: pickFirst(comment.commentTitle, comment.title, comment.header),
         comment: pickFirst(comment.comment, comment.text, comment.commentText, comment.review),
         createdAt: created?.iso,
         createdAtTimestamp: created?.ts,
-        likeCount: getNumber(comment.likeCount ?? comment.helpfulCount ?? comment.like),
+        likeCount: getNumber(comment.likesCount ?? comment.likeCount ?? comment.helpfulCount ?? comment.like),
         dislikeCount: getNumber(comment.dislikeCount ?? comment.unhelpfulCount ?? comment.dislike),
         isVerifiedPurchase: pickFirst(
+            comment.trusted,
             comment.isVerified,
             comment.isBuyer,
             comment.isPurchased,
             comment.isVerifiedPurchase
         ),
         productSize: pickFirst(comment.productSize, comment.size, comment.sizeName, comment.variant?.size),
-        productColor: pickFirst(comment.productColor, comment.color, comment.colorName, comment.variant?.color),
+        productColor: pickFirst(
+            comment.productColor,
+            comment.color,
+            comment.colorName,
+            comment.variant?.color,
+            comment.productVariant?.value
+        ),
         hasImage,
         reviewPageUrl: meta.reviewPageUrl,
         productUrl: meta.productUrl,
@@ -369,6 +418,18 @@ async function fetchReviewsPage({ page, apiUrl, referer, extraHeaders }) {
             const pageHeaders = { accept: headers.accept, ...(extraHeaders || {}) };
             delete pageHeaders.origin;
             delete pageHeaders.referer;
+            delete pageHeaders.host;
+            delete pageHeaders.cookie;
+            delete pageHeaders['accept-encoding'];
+            delete pageHeaders['content-length'];
+            delete pageHeaders['sec-fetch-site'];
+            delete pageHeaders['sec-fetch-mode'];
+            delete pageHeaders['sec-fetch-dest'];
+            delete pageHeaders['sec-fetch-user'];
+            delete pageHeaders['sec-ch-ua'];
+            delete pageHeaders['sec-ch-ua-mobile'];
+            delete pageHeaders['sec-ch-ua-platform'];
+            delete pageHeaders['user-agent'];
             const result = await page.evaluate(
                 async ({ apiUrl: url, hdrs }) => {
                     const resp = await fetch(url, { headers: hdrs, credentials: 'include' });
@@ -386,6 +447,9 @@ async function fetchReviewsPage({ page, apiUrl, referer, extraHeaders }) {
     };
 
     for (let attempt = 1; attempt <= 3; attempt += 1) {
+        const viaPage = await fetchViaPage();
+        if (viaPage?.payload) return viaPage;
+
         const response = await page.request.get(apiUrl, { headers });
         const status = response.status();
         const text = await response.text();
@@ -393,10 +457,6 @@ async function fetchReviewsPage({ page, apiUrl, referer, extraHeaders }) {
         if (payload) return { payload, status };
 
         log.warning(`Non-JSON response (status ${status}) for ${apiUrl}. Retry ${attempt}/3.`);
-        if (status === 403 || status === 404) {
-            const viaPage = await fetchViaPage();
-            if (viaPage?.payload) return viaPage;
-        }
         await sleep(1000 + Math.random() * 1000);
     }
 
@@ -427,12 +487,7 @@ const createReviewResponseCollector = (page, productId) => {
     const handler = async (response) => {
         try {
             const url = response.url();
-            try {
-                const hostname = new URL(url).hostname;
-                if (!hostname.endsWith('trendyol.com')) return;
-            } catch {
-                return;
-            }
+            if (!isLikelyReviewApiUrl(url, productId)) return;
             const status = response.status();
             const ct = response.headers()['content-type'] || '';
             if (!/json|text\/plain/i.test(ct)) return;
@@ -447,14 +502,14 @@ const createReviewResponseCollector = (page, productId) => {
             if (productId && !url.includes(String(productId))) {
                 // URL does not contain productId but payload matches; keep as fallback
                 log.debug(`Captured review-like payload from ${url} without productId in URL.`);
-                }
+            }
 
-                collected.push({
-                    url,
+            collected.push({
+                url,
                 status,
                 payload,
                 headers: stripRequestHeaders(response.request().headers()),
-                });
+            });
         } catch {
             // Ignore response parsing failures
         }
@@ -498,13 +553,27 @@ const handleCountrySelection = async (page) => {
 
     log.info('Country selection detected. Attempting to pick a country.');
 
+    const countrySelect = page.locator('select#country-select');
+    if (await countrySelect.count()) {
+        for (const country of COUNTRY_PREFERENCE) {
+            try {
+                await countrySelect.first().selectOption({ value: country }, { timeout: 3000 });
+                log.info(`Selected country via dropdown: ${country}`);
+                break;
+            } catch {
+                // try next preferred country
+            }
+        }
+    }
+
     for (const country of COUNTRY_PREFERENCE) {
+        const byTestId = await clickFirstVisible(page.locator(`[data-testid="country-text-${country}"]`), 1200);
         const direct = await clickFirstVisible(page.locator(`text=${country}`), 1200);
         const wrapped = await clickFirstVisible(
             page.locator(`text=${country}`).locator('..').locator('button, [role="button"]'),
             1200
         );
-        if (direct || wrapped) {
+        if (byTestId || direct || wrapped) {
             log.info(`Selected country: ${country}`);
             break;
         }
@@ -533,121 +602,121 @@ const ensureReviewContext = async (page, reviewPageUrl) => {
 
 async function main() {
     const input = (await Actor.getInput()) || {};
-        const {
-            productId,
-            startUrls,
-            results_wanted: RESULTS_WANTED_RAW = 20,
-            max_pages: MAX_PAGES_RAW = 5,
-            reviews_per_page: PAGE_SIZE_RAW = DEFAULT_PAGE_SIZE,
-            sortBy: SORT_BY_RAW = 'Date',
-            sortDirection: SORT_DIR_RAW = 'DESC',
-            proxyConfiguration: proxyConfig,
-        } = input;
+    const {
+        productId,
+        startUrls,
+        results_wanted: RESULTS_WANTED_RAW = 20,
+        max_pages: MAX_PAGES_RAW = 5,
+        reviews_per_page: PAGE_SIZE_RAW = DEFAULT_PAGE_SIZE,
+        sortBy: SORT_BY_RAW = 'Date',
+        sortDirection: SORT_DIR_RAW = 'DESC',
+        proxyConfiguration: proxyConfig,
+    } = input;
 
-        const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
-        const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 5;
-        const PAGE_SIZE = clamp(
-            Number.isFinite(+PAGE_SIZE_RAW) ? +PAGE_SIZE_RAW : DEFAULT_PAGE_SIZE,
-            1,
-            50
-        );
-        const SORT_BY = normalizeSortBy(SORT_BY_RAW);
-        const SORT_DIRECTION = normalizeSortDirection(SORT_DIR_RAW);
+    const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
+    const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 5;
+    const PAGE_SIZE = clamp(Number.isFinite(+PAGE_SIZE_RAW) ? +PAGE_SIZE_RAW : DEFAULT_PAGE_SIZE, 1, 50);
+    const SORT_BY = normalizeSortBy(SORT_BY_RAW);
+    const SORT_DIRECTION = normalizeSortDirection(SORT_DIR_RAW);
 
-        const targetMap = new Map();
-        const upsertTarget = (id, data = {}) => {
-            if (!id) return;
-            const existing = targetMap.get(id) || {
-                productId: id,
-                productUrl: null,
-                reviewPageUrl: null,
-                seedUrl: HOME_URL,
-            };
-            targetMap.set(id, {
-                ...existing,
-                productUrl: pickFirst(data.productUrl, existing.productUrl),
-                reviewPageUrl: pickFirst(data.reviewPageUrl, existing.reviewPageUrl),
-                seedUrl: pickFirst(data.seedUrl, existing.seedUrl),
-            });
+    const targetMap = new Map();
+    const upsertTarget = (id, data = {}) => {
+        if (!id) return;
+        const existing = targetMap.get(id) || {
+            productId: id,
+            productUrl: null,
+            reviewPageUrl: null,
+            seedUrl: HOME_URL,
         };
+        targetMap.set(id, {
+            ...existing,
+            productUrl: pickFirst(data.productUrl, existing.productUrl),
+            reviewPageUrl: pickFirst(data.reviewPageUrl, existing.reviewPageUrl),
+            seedUrl: pickFirst(data.seedUrl, existing.seedUrl),
+        });
+    };
 
-        if (productId) {
-            const id = extractProductId(productId);
-            if (!id) log.warning('Invalid productId provided.');
-            else upsertTarget(id);
-        }
+    if (productId) {
+        const id = extractProductId(productId);
+        if (!id) log.warning('Invalid productId provided.');
+        else upsertTarget(id);
+    }
 
-        if (Array.isArray(startUrls)) {
-            startUrls
-                .map((entry) => entry?.url || entry)
-                .filter(Boolean)
-                .forEach((url) => {
-                    const id = extractProductId(url);
-                    if (!id) {
-                        log.warning(`Could not extract productId from startUrl: ${url}`);
-                        return;
-                    }
-                    const reviewPageUrl = buildReviewPageUrl(url);
-                    const productUrl = normalizeProductUrl(url);
-                    upsertTarget(id, {
-                        productUrl,
-                        reviewPageUrl,
-                        seedUrl: reviewPageUrl || HOME_URL,
-                    });
+    if (Array.isArray(startUrls)) {
+        startUrls
+            .map((entry) => entry?.url || entry)
+            .filter(Boolean)
+            .forEach((url) => {
+                const id = extractProductId(url);
+                if (!id) {
+                    log.warning(`Could not extract productId from startUrl: ${url}`);
+                    return;
+                }
+                const reviewPageUrl = buildReviewPageUrl(url);
+                const productUrl = normalizeProductUrl(url);
+                upsertTarget(id, {
+                    productUrl,
+                    reviewPageUrl,
+                    seedUrl: reviewPageUrl || HOME_URL,
                 });
-        }
-
-        const targets = Array.from(targetMap.values()).filter((t) => t.productId);
-        if (!targets.length) {
-            throw new Error('Provide at least one productId or startUrls entry.');
-        }
-
-        log.info(`Starting crawl for ${targets.length} product(s).`);
-
-        // Proxy configuration - handle local development without proxies
-        let proxyConfiguration = null;
-        if (proxyConfig?.useApifyProxy === true) {
-            log.info('Using Apify Proxy (for cloud deployment)');
-            proxyConfiguration = await Actor.createProxyConfiguration({
-                useApifyProxy: true,
-                apifyProxyGroups: proxyConfig.apifyProxyGroups || ['RESIDENTIAL'],
             });
-        } else {
-            log.info('No proxy - Direct connection (local development)');
-        }
+    }
 
-        const savedByProduct = new Map();
-        const seenReviews = new Set();
-        const debugSaved = new Set();
+    const targets = Array.from(targetMap.values()).filter((t) => t.productId);
+    if (!targets.length) {
+        throw new Error('Provide at least one productId or startUrls entry.');
+    }
 
-        const startRequests = targets.map((target) => ({
-            url: target.seedUrl || HOME_URL,
-            userData: {
-                label: 'REVIEWS',
-                productId: target.productId,
-                pageSize: PAGE_SIZE,
-                sortBy: SORT_BY,
-                sortDirection: SORT_DIRECTION,
-                productUrl: target.productUrl,
-                reviewPageUrl: target.reviewPageUrl || target.seedUrl,
+    log.info(`Starting crawl for ${targets.length} product(s).`);
+
+    // Proxy configuration - handle local development without proxies
+    let proxyConfiguration = null;
+    if (proxyConfig?.useApifyProxy === true) {
+        log.info('Using Apify Proxy (for cloud deployment)');
+        proxyConfiguration = await Actor.createProxyConfiguration({
+            useApifyProxy: true,
+            apifyProxyGroups: proxyConfig.apifyProxyGroups || ['RESIDENTIAL'],
+        });
+    } else {
+        log.info('No proxy - Direct connection (local development)');
+    }
+
+    const savedByProduct = new Map();
+    const seenReviews = new Set();
+    const debugSaved = new Set();
+
+    const startRequests = targets.map((target) => ({
+        url: target.seedUrl || HOME_URL,
+        userData: {
+            label: 'REVIEWS',
+            productId: target.productId,
+            pageSize: PAGE_SIZE,
+            sortBy: SORT_BY,
+            sortDirection: SORT_DIRECTION,
+            productUrl: target.productUrl,
+            reviewPageUrl: target.reviewPageUrl || target.seedUrl,
+        },
+    }));
+    log.info(`Prepared ${startRequests.length} start request(s).`);
+    log.info(`Start request URLs: ${startRequests.map((r) => r.url).join(', ')}`);
+    log.info(`Target product IDs: ${targets.map((t) => t.productId).join(', ')}`);
+
+    // Create RequestList from start requests
+    const requestList = await RequestList.open(null, startRequests);
+    log.info(`RequestList initialized with ${requestList.length()} requests`);
+
+    log.info('Creating PlaywrightCrawler...');
+    const crawlerOptions = {
+        requestList,
+        maxRequestRetries: 3,
+        maxConcurrency: 1,
+        requestHandlerTimeoutSecs: 120,
+        navigationTimeoutSecs: 60,
+        launchContext: {
+            launchOptions: {
+                headless: false,
             },
-        }));
-        log.info(`Prepared ${startRequests.length} start request(s).`);
-        log.info(`Start request URLs: ${startRequests.map((r) => r.url).join(', ')}`);
-        log.info(`Target product IDs: ${targets.map((t) => t.productId).join(', ')}`);
-
-        // Create RequestList from start requests
-        const requestList = await RequestList.open(null, startRequests);
-        log.info(`RequestList initialized with ${requestList.length()} requests`);
-
-        log.info('Creating PlaywrightCrawler...');
-        const crawlerOptions = {
-            requestList,
-            maxRequestRetries: 3,
-            maxConcurrency: 1,
-            requestHandlerTimeoutSecs: 120,
-            navigationTimeoutSecs: 60,
-            headless: true,
+        },
 
             async requestHandler({ page, request }) {
                 log.info(`Processing: ${request.url}`);
@@ -667,10 +736,7 @@ async function main() {
                 const requestListener = (req) => {
                     try {
                         const url = req.url();
-                        const hostname = new URL(url).hostname;
-                        if (!hostname.endsWith('trendyol.com')) return;
-                        if (!REVIEW_API_HINT_RE.test(url)) return;
-                        if (targetProductId && !url.includes(String(targetProductId))) return;
+                        if (!isLikelyReviewApiUrl(url, targetProductId)) return;
                         observedRequest = {
                             url,
                             headers: stripRequestHeaders(req.headers()),
@@ -713,7 +779,8 @@ async function main() {
                 const targetReviewUrl = reviewPageUrl || request.url || HOME_URL;
                 await ensureReviewContext(page, targetReviewUrl);
 
-                if (!targetReviewUrl || !page.url().includes('/reviews')) {
+                const onReviewPage = /\/(?:reviews|yorumlar)(?:\/|$)/i.test(page.url());
+                if (!targetReviewUrl || !onReviewPage) {
                     log.info(`Ensuring review page navigation to ${targetReviewUrl}`);
                     await page.goto(targetReviewUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
                 }
@@ -736,6 +803,12 @@ async function main() {
                     log.info('No review API response captured yet; reloading to trigger.');
                     await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
                     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+                    await page
+                        .waitForResponse(
+                            (resp) => isLikelyReviewApiUrl(resp.url(), targetProductId),
+                            { timeout: 12000 }
+                        )
+                        .catch(() => {});
                     await sleep(1000);
                     captured = collector.first();
                 }
@@ -747,7 +820,7 @@ async function main() {
 
                 log.info(`Starting to fetch reviews for product ${targetProductId} (already saved: ${savedForProduct}/${RESULTS_WANTED})`);
                 let saved = savedForProduct;
-                let pageNo = 1;
+                let pageNo = 0;
                 let maxPagesAllowed = MAX_PAGES;
 
                 if (captured?.payload) {
@@ -771,7 +844,7 @@ async function main() {
                             saved += 1;
                         }
                         savedByProduct.set(targetProductId, saved);
-                        pageNo = 2;
+                        pageNo = 1;
 
                         const effectivePageSize = payloadPageSize || pageSize || PAGE_SIZE;
                         const inferredTotalPages =
@@ -782,7 +855,7 @@ async function main() {
                     }
                 }
 
-                while (pageNo <= maxPagesAllowed && saved < RESULTS_WANTED) {
+                while (pageNo < maxPagesAllowed && saved < RESULTS_WANTED) {
                     const apiUrl =
                         buildApiUrlFromTemplate(apiTemplateUrl, {
                             productId: targetProductId,
@@ -799,7 +872,7 @@ async function main() {
                             sortDirection,
                         });
 
-                    log.info(`Fetching page ${pageNo}/${maxPagesAllowed} from API: ${apiUrl}`);
+                    log.info(`Fetching page ${pageNo + 1}/${maxPagesAllowed} from API: ${apiUrl}`);
 
                     const apiResult = await fetchReviewsPage({
                         page,
@@ -879,7 +952,7 @@ async function main() {
                     }
 
                     pageNo += 1;
-                    if (pageNo > maxPagesAllowed) break;
+                    if (pageNo >= maxPagesAllowed) break;
                     await sleep(700 + Math.random() * 900);
                 }
             },
@@ -891,24 +964,24 @@ async function main() {
                     log.error(`Request ${request.url} failed: ${error.message}`);
                 }
             },
-        };
+    };
 
-        if (proxyConfiguration) {
-            crawlerOptions.proxyConfiguration = proxyConfiguration;
-        }
+    if (proxyConfiguration) {
+        crawlerOptions.proxyConfiguration = proxyConfiguration;
+    }
 
-        const crawler = new PlaywrightCrawler(crawlerOptions);
+    const crawler = new PlaywrightCrawler(crawlerOptions);
 
-        log.info('PlaywrightCrawler created successfully!');
-        log.info('Starting PlaywrightCrawler...');
-        await crawler.run();
-        
-        const totalSaved = Array.from(savedByProduct.values()).reduce((sum, v) => sum + v, 0);
-        log.info(`Scraping completed. Total items saved: ${totalSaved}`);
-        
-        if (totalSaved === 0) {
-            log.warning('No reviews were scraped. Check if the product ID is valid or if there are reviews available.');
-        }
+    log.info('PlaywrightCrawler created successfully!');
+    log.info('Starting PlaywrightCrawler...');
+    await crawler.run();
+
+    const totalSaved = Array.from(savedByProduct.values()).reduce((sum, v) => sum + v, 0);
+    log.info(`Scraping completed. Total items saved: ${totalSaved}`);
+
+    if (totalSaved === 0) {
+        log.warning('No reviews were scraped. Check if the product ID is valid or if there are reviews available.');
+    }
 }
 
 const run = async () => {
