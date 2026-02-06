@@ -30,58 +30,30 @@
     "results_wanted": {
       "title": "Maximum number of reviews per product",
       "type": "integer",
-      "description": "Maximum number of reviews to collect for each product.",
-      "minimum": 1,
+      "description": "Maximum number of reviews to collect for each product. Use 0 to fetch all available reviews.",
+      "minimum": 0,
       "default": 20,
       "editor": "number"
     },
     "max_pages": {
       "title": "Maximum number of pages",
       "type": "integer",
-      "description": "Safety cap on the number of review pages to visit per product.",
-      "minimum": 1,
-      "default": 5,
-      "editor": "number"
-    },
-    "reviews_per_page": {
-      "title": "Reviews per page",
-      "type": "integer",
-      "description": "Number of reviews to request per page.",
-      "minimum": 1,
-      "maximum": 50,
-      "default": 20,
+      "description": "Safety cap on pages to visit per product. Use 0 to allow all available pages.",
+      "minimum": 0,
+      "default": 0,
       "editor": "number"
     },
     "sortBy": {
       "title": "Sort by",
       "type": "string",
-      "description": "Sorting for reviews.",
+      "description": "Sorting for reviews (Trendyol API currently supports rating sort reliably).",
       "editor": "select",
-      "default": "Date",
+      "default": "Rate",
       "enum": [
-        "Date",
-        "Rate",
-        "Helpfulness"
+        "Rate"
       ],
       "enumTitles": [
-        "Newest",
-        "Rating",
-        "Most helpful"
-      ]
-    },
-    "sortDirection": {
-      "title": "Sort direction",
-      "type": "string",
-      "description": "Sort direction.",
-      "editor": "select",
-      "default": "DESC",
-      "enum": [
-        "DESC",
-        "ASC"
-      ],
-      "enumTitles": [
-        "Descending",
-        "Ascending"
+        "Rating"
       ]
     },
     "proxyConfiguration": {

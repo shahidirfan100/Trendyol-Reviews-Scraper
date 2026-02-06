@@ -22,12 +22,11 @@ const COUNTRY_SELECT_SELECTORS = [
     'button:has-text("Start shopping")',
 ];
 const COUNTRY_PREFERENCE = ['USA', 'United States', 'Türkiye', 'Turkey', 'Germany', 'France', 'Italy'];
-const DEFAULT_PAGE_SIZE = 20;
+const DEFAULT_PAGE_SIZE = 50;
+const ORDER_DIRECTION = 'DESC';
 const BLOCKED_TITLE_RE = /(access denied|captcha|attention required|verify|robot|blocked)/i;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
 const safeJsonParse = (value) => {
     try {
@@ -65,6 +64,23 @@ const pickFirst = (...values) => {
         if (typeof value === 'string' && value.trim() === '') continue;
         return value;
     }
+    return null;
+};
+
+const toOptionalString = (value) => {
+    if (value === null || value === undefined) return null;
+    const text = String(value).trim();
+    return text || null;
+};
+
+const toOptionalBoolean = (value) => {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value !== 0;
+    const text = String(value).trim().toLowerCase();
+    if (!text) return null;
+    if (['true', '1', 'yes', 'y'].includes(text)) return true;
+    if (['false', '0', 'no', 'n'].includes(text)) return false;
     return null;
 };
 
@@ -145,7 +161,7 @@ const extractProductId = (value) => {
 
 const normalizeSortBy = (value) => {
     const raw = String(value || '').trim().toLowerCase();
-    if (!raw) return 'Date';
+    if (!raw) return 'Rate';
     const map = {
         date: 'Date',
         newest: 'Date',
@@ -157,28 +173,23 @@ const normalizeSortBy = (value) => {
     };
     if (map[raw]) return map[raw];
     if (['Date', 'Rate', 'Helpfulness'].includes(value)) return value;
-    return 'Date';
-};
-
-const normalizeSortDirection = (value) => {
-    const raw = String(value || '').trim().toUpperCase();
-    return raw === 'ASC' || raw === 'DESC' ? raw : 'DESC';
+    return 'Rate';
 };
 
 const toApiOrderBy = (sortBy) => {
     const map = {
-        Date: 'Date',
+        Date: 'Score',
         Rate: 'Score',
-        Helpfulness: 'Helpfulness',
+        Helpfulness: 'Score',
     };
-    return map[sortBy] || 'Date';
+    return map[sortBy] || 'Score';
 };
 
-const buildApiUrl = ({ productId, page, size, sortBy, sortDirection }) => {
+const buildApiUrl = ({ productId, page, size, sortBy }) => {
     const url = new URL(REVIEWS_API);
     url.searchParams.set('contentId', String(productId));
     url.searchParams.set('orderBy', toApiOrderBy(sortBy));
-    url.searchParams.set('order', sortDirection);
+    url.searchParams.set('order', ORDER_DIRECTION);
     url.searchParams.set('page', String(page));
     url.searchParams.set('pageSize', String(size));
     url.searchParams.set('channelId', '1');
@@ -187,7 +198,7 @@ const buildApiUrl = ({ productId, page, size, sortBy, sortDirection }) => {
 
 const findExistingParam = (params, candidates) => candidates.find((name) => params.has(name)) || null;
 
-const buildApiUrlFromTemplate = (templateUrl, { productId, page, size, sortBy, sortDirection }) => {
+const buildApiUrlFromTemplate = (templateUrl, { productId, page, size, sortBy }) => {
     if (!templateUrl) return null;
     try {
         const url = new URL(templateUrl);
@@ -202,9 +213,10 @@ const buildApiUrlFromTemplate = (templateUrl, { productId, page, size, sortBy, s
 
         if (contentKey && productId != null) params.set(contentKey, String(productId));
         if (pageKey && page != null) params.set(pageKey, String(page));
-        if (sizeKey && size != null) params.set(sizeKey, String(size));
+        // Keep template page size when present to preserve server pagination behavior.
+        if (sizeKey && size != null && !params.get(sizeKey)) params.set(sizeKey, String(size));
         if (sortKey && sortBy) params.set(sortKey, String(toApiOrderBy(sortBy)));
-        if (dirKey && sortDirection) params.set(dirKey, String(sortDirection));
+        if (dirKey) params.set(dirKey, ORDER_DIRECTION);
         if (channelKey) params.set(channelKey, '1');
 
         return url.href;
@@ -291,8 +303,7 @@ const mapReview = (comment, meta) => {
 
     return sanitizeItem({
         productId: meta.productId,
-        reviewId: pickFirst(comment.id, comment.commentId, comment.reviewId, comment.reviewID),
-        reviewerName: pickFirst(comment.userFullName, comment.userName, comment.username),
+        reviewId: toOptionalString(pickFirst(comment.id, comment.commentId, comment.reviewId, comment.reviewID)),
         rating: getNumber(comment.rate ?? comment.rating ?? comment.starRating ?? comment.score),
         title: pickFirst(comment.commentTitle, comment.title, comment.header),
         comment: pickFirst(comment.comment, comment.text, comment.commentText, comment.review),
@@ -300,20 +311,24 @@ const mapReview = (comment, meta) => {
         createdAtTimestamp: created?.ts,
         likeCount: getNumber(comment.likesCount ?? comment.likeCount ?? comment.helpfulCount ?? comment.like),
         dislikeCount: getNumber(comment.dislikeCount ?? comment.unhelpfulCount ?? comment.dislike),
-        isVerifiedPurchase: pickFirst(
-            comment.trusted,
-            comment.isVerified,
-            comment.isBuyer,
-            comment.isPurchased,
-            comment.isVerifiedPurchase
+        isVerifiedPurchase: toOptionalBoolean(
+            pickFirst(
+                comment.trusted,
+                comment.isVerified,
+                comment.isBuyer,
+                comment.isPurchased,
+                comment.isVerifiedPurchase
+            )
         ),
-        productSize: pickFirst(comment.productSize, comment.size, comment.sizeName, comment.variant?.size),
-        productColor: pickFirst(
-            comment.productColor,
-            comment.color,
-            comment.colorName,
-            comment.variant?.color,
-            comment.productVariant?.value
+        productSize: toOptionalString(pickFirst(comment.productSize, comment.size, comment.sizeName, comment.variant?.size)),
+        productColor: toOptionalString(
+            pickFirst(
+                comment.productColor,
+                comment.color,
+                comment.colorName,
+                comment.variant?.color,
+                comment.productVariant?.value
+            )
         ),
         hasImage,
         reviewPageUrl: meta.reviewPageUrl,
@@ -384,14 +399,14 @@ const mapJsonLdReview = (review, meta) => {
     const ratingValue = review?.reviewRating?.ratingValue ?? review?.reviewRating?.rating;
     const mapped = {
         productId: meta.productId,
-        reviewId: pickFirst(review.identifier, review.id),
+        reviewId: toOptionalString(pickFirst(review.identifier, review.id)),
         rating: getNumber(ratingValue),
         title: pickFirst(review.name, review.headline),
         comment: pickFirst(review.reviewBody, review.description, review.review),
         createdAt: created?.iso,
         createdAtTimestamp: created?.ts,
         likeCount: getNumber(review?.interactionStatistic?.userInteractionCount),
-        isVerifiedPurchase: pickFirst(review.isVerified, review.verified),
+        isVerifiedPurchase: toOptionalBoolean(pickFirst(review.isVerified, review.verified)),
         hasImage: Boolean(review?.image),
         reviewPageUrl: meta.reviewPageUrl,
         productUrl: meta.productUrl,
@@ -538,7 +553,7 @@ const handleCookieConsent = async (page) => {
     for (const selector of COOKIE_BUTTON_SELECTORS) {
         const clicked = await clickFirstVisible(page.locator(selector));
         if (clicked) {
-            log.info(`Accepted cookie banner via selector: ${selector}`);
+            log.debug(`Accepted cookie banner via selector: ${selector}`);
             await sleep(500);
             return true;
         }
@@ -551,14 +566,14 @@ const handleCountrySelection = async (page) => {
     const hasCountryFragment = (await page.locator('#m-country-selection').count()) > 0;
     if (!COUNTRY_PAGE_RE.test(url) && !hasCountryFragment) return false;
 
-    log.info('Country selection detected. Attempting to pick a country.');
+    log.debug('Country selection detected. Attempting to pick a country.');
 
     const countrySelect = page.locator('select#country-select');
     if (await countrySelect.count()) {
         for (const country of COUNTRY_PREFERENCE) {
             try {
                 await countrySelect.first().selectOption({ value: country }, { timeout: 3000 });
-                log.info(`Selected country via dropdown: ${country}`);
+                log.debug(`Selected country via dropdown: ${country}`);
                 break;
             } catch {
                 // try next preferred country
@@ -574,7 +589,7 @@ const handleCountrySelection = async (page) => {
             1200
         );
         if (byTestId || direct || wrapped) {
-            log.info(`Selected country: ${country}`);
+            log.debug(`Selected country: ${country}`);
             break;
         }
     }
@@ -582,7 +597,7 @@ const handleCountrySelection = async (page) => {
     for (const selector of COUNTRY_SELECT_SELECTORS) {
         const clicked = await clickFirstVisible(page.locator(selector), 3000);
         if (clicked) {
-            log.info(`Confirmed country selection via selector: ${selector}`);
+            log.debug(`Confirmed country selection via selector: ${selector}`);
             await page.waitForLoadState('domcontentloaded', { timeout: 20000 }).catch(() => {});
             return true;
         }
@@ -606,18 +621,17 @@ async function main() {
         productId,
         startUrls,
         results_wanted: RESULTS_WANTED_RAW = 20,
-        max_pages: MAX_PAGES_RAW = 5,
-        reviews_per_page: PAGE_SIZE_RAW = DEFAULT_PAGE_SIZE,
-        sortBy: SORT_BY_RAW = 'Date',
-        sortDirection: SORT_DIR_RAW = 'DESC',
+        max_pages: MAX_PAGES_RAW = 0,
+        sortBy: SORT_BY_RAW = 'Rate',
         proxyConfiguration: proxyConfig,
     } = input;
 
-    const RESULTS_WANTED = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.max(1, +RESULTS_WANTED_RAW) : 20;
-    const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(1, +MAX_PAGES_RAW) : 5;
-    const PAGE_SIZE = clamp(Number.isFinite(+PAGE_SIZE_RAW) ? +PAGE_SIZE_RAW : DEFAULT_PAGE_SIZE, 1, 50);
+    const requestedResults = Number.isFinite(+RESULTS_WANTED_RAW) ? Math.floor(+RESULTS_WANTED_RAW) : 20;
+    const RESULTS_WANTED = requestedResults === 0 ? Number.POSITIVE_INFINITY : Math.max(1, requestedResults);
+    const MAX_PAGES = Number.isFinite(+MAX_PAGES_RAW) ? Math.max(0, Math.floor(+MAX_PAGES_RAW)) : 0;
+    const PAGE_SIZE = DEFAULT_PAGE_SIZE;
     const SORT_BY = normalizeSortBy(SORT_BY_RAW);
-    const SORT_DIRECTION = normalizeSortDirection(SORT_DIR_RAW);
+    const requestedLabel = Number.isFinite(RESULTS_WANTED) ? String(RESULTS_WANTED) : 'all';
 
     const targetMap = new Map();
     const upsertTarget = (id, data = {}) => {
@@ -690,28 +704,22 @@ async function main() {
         userData: {
             label: 'REVIEWS',
             productId: target.productId,
-            pageSize: PAGE_SIZE,
             sortBy: SORT_BY,
-            sortDirection: SORT_DIRECTION,
             productUrl: target.productUrl,
             reviewPageUrl: target.reviewPageUrl || target.seedUrl,
         },
     }));
-    log.info(`Prepared ${startRequests.length} start request(s).`);
-    log.info(`Start request URLs: ${startRequests.map((r) => r.url).join(', ')}`);
-    log.info(`Target product IDs: ${targets.map((t) => t.productId).join(', ')}`);
 
     // Create RequestList from start requests
     const requestList = await RequestList.open(null, startRequests);
-    log.info(`RequestList initialized with ${requestList.length()} requests`);
-
-    log.info('Creating PlaywrightCrawler...');
+    log.info(`Prepared ${startRequests.length} product request(s), target reviews: ${requestedLabel}.`);
     const crawlerOptions = {
         requestList,
-        maxRequestRetries: 3,
+        maxRequestRetries: 2,
         maxConcurrency: 1,
-        requestHandlerTimeoutSecs: 120,
-        navigationTimeoutSecs: 60,
+        requestHandlerTimeoutSecs: 90,
+        navigationTimeoutSecs: 45,
+        statusMessageLoggingInterval: 300,
         launchContext: {
             launchOptions: {
                 headless: false,
@@ -719,14 +727,11 @@ async function main() {
         },
 
             async requestHandler({ page, request }) {
-                log.info(`Processing: ${request.url}`);
-                log.info(`UserData: ${JSON.stringify(request.userData)}`);
+                log.debug(`Processing: ${request.url}`);
 
                 const {
                     productId: targetProductId,
-                    pageSize,
                     sortBy,
-                    sortDirection,
                     productUrl,
                     reviewPageUrl,
                 } = request.userData || {};
@@ -750,20 +755,12 @@ async function main() {
                 // Wait for page to load
                 try {
                     await page.waitForLoadState('domcontentloaded', { timeout: 30000 });
-                    log.info('Page loaded: domcontentloaded');
                 } catch (err) {
                     log.warning(`Timeout waiting for domcontentloaded: ${err.message}`);
                 }
 
-                try {
-                    await page.waitForLoadState('networkidle', { timeout: 10000 });
-                    log.info('Page loaded: networkidle');
-                } catch (err) {
-                    log.warning(`Timeout waiting for networkidle: ${err.message}`);
-                }
-
                 const title = await page.title().catch(() => '');
-                if (title) log.info(`Page title: ${title}`);
+                if (title) log.debug(`Page title: ${title}`);
                 if (BLOCKED_TITLE_RE.test(title)) {
                     const debugKey = `blocked-${request.userData?.productId || 'unknown'}`;
                     if (!debugSaved.has(debugKey)) {
@@ -781,28 +778,21 @@ async function main() {
 
                 const onReviewPage = /\/(?:reviews|yorumlar)(?:\/|$)/i.test(page.url());
                 if (!targetReviewUrl || !onReviewPage) {
-                    log.info(`Ensuring review page navigation to ${targetReviewUrl}`);
+                    log.debug(`Ensuring review page navigation to ${targetReviewUrl}`);
                     await page.goto(targetReviewUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
-                }
-
-                try {
-                    await page.waitForLoadState('networkidle', { timeout: 10000 });
-                } catch (err) {
-                    log.warning(`Timeout waiting for networkidle after navigation: ${err.message}`);
                 }
 
                 const savedForProduct = savedByProduct.get(targetProductId) || 0;
                 if (savedForProduct >= RESULTS_WANTED) {
-                    log.info(`Already saved ${savedForProduct} reviews for product ${targetProductId}, skipping`);
+                    log.debug(`Already saved ${savedForProduct} reviews for product ${targetProductId}, skipping`);
                     collector.stop();
                     return;
                 }
 
                 let captured = collector.first();
                 if (!captured) {
-                    log.info('No review API response captured yet; reloading to trigger.');
+                    log.debug('No review API response captured yet; reloading to trigger.');
                     await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
-                    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
                     await page
                         .waitForResponse(
                             (resp) => isLikelyReviewApiUrl(resp.url(), targetProductId),
@@ -818,17 +808,17 @@ async function main() {
                 const apiTemplateUrl = captured?.url || observedRequest?.url || null;
                 const apiHeaders = captured?.headers || observedRequest?.headers || null;
 
-                log.info(`Starting to fetch reviews for product ${targetProductId} (already saved: ${savedForProduct}/${RESULTS_WANTED})`);
+                log.info(`Fetching reviews for product ${targetProductId} (${savedForProduct}/${requestedLabel} saved).`);
                 let saved = savedForProduct;
                 let pageNo = 0;
-                let maxPagesAllowed = MAX_PAGES;
+                let maxPagesAllowed = MAX_PAGES === 0 ? Number.POSITIVE_INFINITY : MAX_PAGES;
 
                 if (captured?.payload) {
                     const { comments, totalCount, pageSize: payloadPageSize, totalPages } =
                         extractReviewsFromPayload(captured.payload);
 
                     if (comments.length) {
-                        log.info(`Captured ${comments.length} review(s) from network response.`);
+                        log.debug(`Captured ${comments.length} review(s) from network response.`);
                         for (const comment of comments) {
                             if (saved >= RESULTS_WANTED) break;
                             const review = mapReview(comment, {
@@ -846,11 +836,13 @@ async function main() {
                         savedByProduct.set(targetProductId, saved);
                         pageNo = 1;
 
-                        const effectivePageSize = payloadPageSize || pageSize || PAGE_SIZE;
+                        const effectivePageSize = payloadPageSize || PAGE_SIZE;
                         const inferredTotalPages =
                             totalPages || (totalCount && effectivePageSize ? Math.ceil(totalCount / effectivePageSize) : null);
                         if (inferredTotalPages) {
-                            maxPagesAllowed = Math.min(MAX_PAGES, inferredTotalPages);
+                            maxPagesAllowed = Number.isFinite(maxPagesAllowed)
+                                ? Math.min(maxPagesAllowed, inferredTotalPages)
+                                : inferredTotalPages;
                         }
                     }
                 }
@@ -860,19 +852,17 @@ async function main() {
                         buildApiUrlFromTemplate(apiTemplateUrl, {
                             productId: targetProductId,
                             page: pageNo,
-                            size: pageSize,
+                            size: PAGE_SIZE,
                             sortBy,
-                            sortDirection,
                         }) ||
                         buildApiUrl({
                             productId: targetProductId,
                             page: pageNo,
-                            size: pageSize,
+                            size: PAGE_SIZE,
                             sortBy,
-                            sortDirection,
                         });
 
-                    log.info(`Fetching page ${pageNo + 1}/${maxPagesAllowed} from API: ${apiUrl}`);
+                    log.debug(`Fetching page ${pageNo + 1}/${maxPagesAllowed} from API`);
 
                     const apiResult = await fetchReviewsPage({
                         page,
@@ -923,7 +913,7 @@ async function main() {
                         extractReviewsFromPayload(apiResult.payload);
 
                     if (!comments.length) {
-                        log.info(`No reviews found for product ${targetProductId} on page ${pageNo}.`);
+                        log.debug(`No reviews found for product ${targetProductId} on page ${pageNo}.`);
                         break;
                     }
 
@@ -944,16 +934,18 @@ async function main() {
 
                     savedByProduct.set(targetProductId, saved);
 
-                    const effectivePageSize = payloadPageSize || pageSize || PAGE_SIZE;
+                    const effectivePageSize = payloadPageSize || PAGE_SIZE;
                     const inferredTotalPages =
                         totalPages || (totalCount && effectivePageSize ? Math.ceil(totalCount / effectivePageSize) : null);
                     if (inferredTotalPages) {
-                        maxPagesAllowed = Math.min(MAX_PAGES, inferredTotalPages);
+                        maxPagesAllowed = Number.isFinite(maxPagesAllowed)
+                            ? Math.min(maxPagesAllowed, inferredTotalPages)
+                            : inferredTotalPages;
                     }
 
                     pageNo += 1;
                     if (pageNo >= maxPagesAllowed) break;
-                    await sleep(700 + Math.random() * 900);
+                    await sleep(100 + Math.random() * 150);
                 }
             },
 
@@ -972,8 +964,6 @@ async function main() {
 
     const crawler = new PlaywrightCrawler(crawlerOptions);
 
-    log.info('PlaywrightCrawler created successfully!');
-    log.info('Starting PlaywrightCrawler...');
     await crawler.run();
 
     const totalSaved = Array.from(savedByProduct.values()).reduce((sum, v) => sum + v, 0);

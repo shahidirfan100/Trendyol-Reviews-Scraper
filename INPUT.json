@@ -1,10 +1,8 @@
 {
   "productId": "743505175",
   "results_wanted": 20,
-  "max_pages": 3,
-  "reviews_per_page": 20,
-  "sortBy": "Date",
-  "sortDirection": "DESC",
+  "max_pages": 0,
+  "sortBy": "Rate",
   "proxyConfiguration": {
     "useApifyProxy": false,
     "apifyProxyGroups": [
